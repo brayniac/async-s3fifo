@@ -512,7 +512,7 @@ impl Segment for SliceSegment<'_> {
         &'a self,
         offset: u32,
         key: &[u8],
-    ) -> Result<crate::item::ItemGuard<'a, Self>, GetItemError> {
+    ) -> Result<crate::item::ItemGuard<'a>, GetItemError> {
         use crate::item::SmallQueueItemHeader;
         use clocksource::coarse::UnixInstant;
         use std::sync::atomic::Ordering;
@@ -600,7 +600,7 @@ impl Segment for SliceSegment<'_> {
 
             // Create guard with slices into segment data
             Ok(crate::item::ItemGuard::new(
-                self,
+                &self.ref_count,
                 &raw[key_start..key_end],
                 &raw[value_start..value_end],
                 &raw[optional_start..optional_end],
@@ -666,7 +666,7 @@ impl Segment for SliceSegment<'_> {
             // Create guard with slices into segment data
             // The guard will decrement ref_count on drop
             Ok(crate::item::ItemGuard::new(
-                self,
+                &self.ref_count,
                 &raw[key_start..key_end],
                 &raw[value_start..value_end],
                 &raw[optional_start..optional_end],

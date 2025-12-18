@@ -1053,7 +1053,7 @@ impl Cache {
     /// socket.write_all(value)?;
     /// // Guard dropped here, segment ref_count decremented
     /// ```
-    pub async fn get(&self, key: &[u8]) -> Option<crate::item::ItemGuard<'_, crate::segment::SliceSegment<'static>>> {
+    pub async fn get(&self, key: &[u8]) -> Option<crate::item::ItemGuard<'_>> {
         // Look up in hashtable (this also increments frequency)
         let (segment_id, offset) = self.inner.hashtable.get(key, &self.inner.ram_layer)?;
 
@@ -1085,7 +1085,7 @@ impl Cache {
         segment_id: u32,
         offset: u32,
         ssd_layer: &SsdLayer,
-    ) -> Option<crate::item::ItemGuard<'_, crate::segment::SliceSegment<'static>>> {
+    ) -> Option<crate::item::ItemGuard<'_>> {
         // Read item data from SSD (mmap or DirectIo)
         let (value, optional, expire_at) = self.read_ssd_item(key, segment_id, offset, ssd_layer)?;
 
@@ -1250,7 +1250,7 @@ impl Cache {
     ///     }
     /// }
     /// ```
-    pub fn gets(&self, key: &[u8]) -> Option<(crate::item::ItemGuard<'_, crate::segment::SliceSegment<'static>>, crate::CasToken)> {
+    pub fn gets(&self, key: &[u8]) -> Option<(crate::item::ItemGuard<'_>, crate::CasToken)> {
         // Look up in hashtable (this also increments frequency)
         let (segment_id, offset) = self.inner.hashtable.get(key, &self.inner.ram_layer)?;
 

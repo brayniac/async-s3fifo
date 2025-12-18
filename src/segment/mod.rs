@@ -202,7 +202,7 @@ pub trait Segment {
         &'a self,
         offset: u32,
         key: &[u8],
-    ) -> Result<crate::item::ItemGuard<'a, Self>, GetItemError>;
+    ) -> Result<crate::item::ItemGuard<'a>, GetItemError>;
 
     fn mark_deleted(&self, offset: u32, key: &[u8], metrics: &crate::metrics::CacheMetrics) -> Result<bool, ()>;
 

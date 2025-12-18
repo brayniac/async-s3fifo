@@ -502,7 +502,7 @@ impl crate::segment::Segment for DirectIoSegmentWrapper {
     fn append_small_queue_item(&self, _key: &[u8], _value: &[u8], _optional: &[u8], _expire_at: u32, _metrics: &CacheMetrics) -> Option<u32> { unreachable!() }
     fn mark_deleted(&self, _offset: u32, _key: &[u8], _metrics: &CacheMetrics) -> Result<bool, ()> { unreachable!() }
     fn verify_key_at_offset(&self, _offset: u32, _key: &[u8], _allow_deleted: bool) -> bool { unreachable!() }
-    fn get_item_guard(&self, _offset: u32, _key: &[u8]) -> Result<crate::ItemGuard<'_, Self>, crate::GetItemError> where Self: Sized { unreachable!() }
+    fn get_item_guard(&self, _offset: u32, _key: &[u8]) -> Result<crate::ItemGuard<'_>, crate::GetItemError> { unreachable!() }
     fn prev(&self) -> Option<u32> { unreachable!() }
     fn next(&self) -> Option<u32> { unreachable!() }
     fn try_reserve(&self) -> bool { unreachable!() }

@@ -1,4 +1,5 @@
-use crate::segment::Segment;
+use crate::sync::AtomicU32;
+use std::sync::atomic::Ordering;
 
 /// Item header for main cache segments (TTL inherited from segment)
 ///
@@ -422,14 +423,14 @@ impl SmallQueueItemHeader {
 /// socket.write_all(value)?;
 /// // Guard dropped here, ref_count decremented
 /// ```
-pub struct ItemGuard<'a, S> where S: Segment + ?Sized {
-    segment: &'a S,
+pub struct ItemGuard<'a> {
+    ref_count: &'a AtomicU32,
     key: &'a [u8],
     value: &'a [u8],
     optional: &'a [u8],
 }
 
-impl<'a, S> ItemGuard<'a, S> where S: Segment {
+impl<'a> ItemGuard<'a> {
     /// Create a new ItemGuard
     ///
     /// # Safety
@@ -437,13 +438,13 @@ impl<'a, S> ItemGuard<'a, S> where S: Segment {
     /// - The segment's ref_count has been incremented
     /// - The slice references are valid and point into the segment's data
     pub(crate) fn new(
-        segment: &'a S,
+        ref_count: &'a AtomicU32,
         key: &'a [u8],
         value: &'a [u8],
         optional: &'a [u8],
     ) -> Self {
         Self {
-            segment,
+            ref_count,
             key,
             value,
             optional,
@@ -466,8 +467,8 @@ impl<'a, S> ItemGuard<'a, S> where S: Segment {
     }
 }
 
-impl<S: ?Sized + Segment> Drop for ItemGuard<'_, S> {
+impl Drop for ItemGuard<'_> {
     fn drop(&mut self) {
-        self.segment.decr_ref_count();
+        self.ref_count.fetch_sub(1, Ordering::Release);
     }
 }
