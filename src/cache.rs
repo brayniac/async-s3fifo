@@ -202,6 +202,8 @@ pub struct CacheBuilder {
     ram_size: usize,
     ram_segment_size: usize,
     ram_small_queue_percent: u8,
+    /// Hugepage size preference for RAM allocation
+    hugepage_size: crate::hugepage::HugepageSize,
 
     // SSD configuration (optional)
     ssd_path: Option<std::path::PathBuf>,
@@ -246,6 +248,7 @@ impl CacheBuilder {
             ram_size: 64 * 1024 * 1024,        // 64MB default
             ram_segment_size: 1024 * 1024,     // 1MB segments
             ram_small_queue_percent: 10,
+            hugepage_size: crate::hugepage::HugepageSize::None,
             ssd_path: None,
             ssd_size: 0,
             ssd_segment_size: 4 * 1024 * 1024, // 4MB segments for SSD
@@ -283,6 +286,19 @@ impl CacheBuilder {
     pub fn ram_small_queue_percent(mut self, percent: u8) -> Self {
         debug_assert!(percent <= 100, "percent must be <= 100");
         self.ram_small_queue_percent = percent;
+        self
+    }
+
+    /// Set the hugepage size preference for RAM heap allocation.
+    ///
+    /// - `HugepageSize::None` - Use regular 4KB pages (default)
+    /// - `HugepageSize::TwoMegabyte` - Try 2MB hugepages, fallback to regular
+    /// - `HugepageSize::OneGigabyte` - Try 1GB hugepages, fallback to regular
+    ///
+    /// Note: The actual allocation may fall back to regular pages if the
+    /// requested hugepage size is not available on the system.
+    pub fn hugepage_size(mut self, size: crate::hugepage::HugepageSize) -> Self {
+        self.hugepage_size = size;
         self
     }
 
@@ -452,6 +468,7 @@ impl CacheBuilder {
             .segment_size(self.ram_segment_size)
             .heap_size(self.ram_size)
             .small_queue_percent(self.ram_small_queue_percent)
+            .hugepage_size(self.hugepage_size)
             .build()?;
 
         // Initialize segments_free gauge with total segment count

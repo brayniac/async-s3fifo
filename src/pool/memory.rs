@@ -1,13 +1,10 @@
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use crate::hugepage::{HugepageAllocation, HugepageSize};
 use crate::pool::Pool;
 use crate::segment::{Segment, SliceSegment};
 
 pub struct MemoryPool {
-    /// Pointer to the allocated heap memory
-    heap_ptr: *mut u8,
-
-    /// Layout used for allocation (needed for deallocation)
-    layout: Layout,
+    /// Heap memory allocation (handles deallocation automatically)
+    heap: HugepageAllocation,
 
     /// Segment metadata (in RAM for fast access)
     segments: Vec<SliceSegment<'static>>,
@@ -34,11 +31,9 @@ unsafe impl Sync for MemoryPool {}
 
 impl Drop for MemoryPool {
     fn drop(&mut self) {
-        // SAFETY: heap_ptr was allocated with this layout in build()
-        // and has not been deallocated yet
-        unsafe {
-            dealloc(self.heap_ptr, self.layout);
-        }
+        // Clear segments first to ensure any references to heap memory are dropped
+        self.segments.clear();
+        // HugepageAllocation handles deallocation automatically
     }
 }
 
@@ -134,6 +129,7 @@ pub struct MemoryPoolBuilder {
     segment_size: usize,
     heap_size: usize,
     small_queue_percent: u8,
+    hugepage_size: HugepageSize,
 }
 
 impl MemoryPoolBuilder {
@@ -143,6 +139,7 @@ impl MemoryPoolBuilder {
             segment_size: 1024 * 1024,
             heap_size: 64 * 1024 * 1024,
             small_queue_percent: 10,
+            hugepage_size: HugepageSize::None,
         }
     }
 
@@ -167,50 +164,27 @@ impl MemoryPoolBuilder {
         self
     }
 
+    /// Set the hugepage size preference for heap allocation.
+    ///
+    /// - `HugepageSize::None` - Use regular 4KB pages (default)
+    /// - `HugepageSize::TwoMegabyte` - Try 2MB hugepages, fallback to regular
+    /// - `HugepageSize::OneGigabyte` - Try 1GB hugepages, fallback to regular
+    ///
+    /// Note: The actual allocation may fall back to regular pages if the
+    /// requested hugepage size is not available on the system.
+    pub fn hugepage_size(mut self, size: HugepageSize) -> Self {
+        self.hugepage_size = size;
+        self
+    }
+
     pub fn build(self) -> Result<MemoryPool, std::io::Error> {
         let num_segments = self.heap_size / self.segment_size;
         let small_queue_count = (num_segments * self.small_queue_percent as usize) / 100;
 
         let actual_size = num_segments * self.segment_size;
 
-        // Allocate the entire heap as a single page-aligned block
-        // Use 2MB alignment for potential huge page support on systems that support it
-        // Falls back to regular pages if huge pages are not available
-        const HUGE_PAGE_SIZE: usize = 2 * 1024 * 1024; // 2MB
-        const REGULAR_PAGE_SIZE: usize = 4096;
-
-        let alignment = if actual_size >= HUGE_PAGE_SIZE && actual_size.is_multiple_of(HUGE_PAGE_SIZE)
-        {
-            HUGE_PAGE_SIZE
-        } else {
-            REGULAR_PAGE_SIZE
-        };
-
-        let layout =
-            Layout::from_size_align(actual_size, alignment).expect("Failed to create layout");
-
-        // Use alloc_zeroed to get zero-initialized memory
-        // This is important for security and consistency
-        let heap_ptr = unsafe { alloc_zeroed(layout) };
-        if heap_ptr.is_null() {
-            panic!(
-                "Failed to allocate {} bytes for segments heap",
-                self.heap_size
-            );
-        }
-
-        // Pre-fault all pages by touching them
-        // This forces the OS to allocate physical pages now rather than on first access
-        // which avoids page faults during critical write operations
-        unsafe {
-            // Touch only one location per page to minimize memory traffic
-            // One write per page is sufficient to fault the entire page
-            const PAGE_SIZE: usize = 4096;
-
-            for i in (0..actual_size).step_by(PAGE_SIZE) {
-                std::ptr::write_volatile(heap_ptr.add(i) as *mut u64, 0);
-            }
-        }
+        // Allocate the heap using hugepage-aware allocation
+        let heap = crate::hugepage::allocate(actual_size, self.hugepage_size)?;
 
         // Initialize segment metadata
         let mut segments = Vec::with_capacity(num_segments);
@@ -218,8 +192,8 @@ impl MemoryPoolBuilder {
         let main_cache_free = crossbeam_deque::Injector::new();
 
         for id in 0..num_segments {
-            let mmap_offset = id * self.segment_size;
-            let segment_ptr = unsafe { heap_ptr.add(mmap_offset) };
+            let offset = id * self.segment_size;
+            let segment_ptr = unsafe { heap.as_ptr().add(offset) };
 
             // Segments [0..small_queue_count) are small queue, rest are main cache
             let is_small_queue = id < small_queue_count;
@@ -238,8 +212,7 @@ impl MemoryPoolBuilder {
         }
 
         Ok(MemoryPool {
-            heap_ptr,
-            layout,
+            heap,
             segments,
             small_queue_free,
             main_cache_free,

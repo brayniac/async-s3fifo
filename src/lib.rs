@@ -1,5 +1,6 @@
 mod cache;
 pub mod hashtable;
+mod hugepage;
 mod item;
 mod layer;
 mod metrics;
@@ -12,6 +13,7 @@ mod util;
 
 // Public API exports
 pub use cache::{Cache, CacheBuilder, SsdBackendType};
+pub use hugepage::HugepageSize;
 pub use item::ItemGuard;
 pub use metrics::CacheMetrics;
 pub use pool::{
