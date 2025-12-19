@@ -1,12 +1,16 @@
 use crate::segment::Segment;
 use crate::pool::Pool;
 use crate::util::*;
+use crate::hugepage::{HugepageAllocation, HugepageSize, allocate};
 use ahash::RandomState;
 use crate::sync::*;
 
 pub struct Hashtable {
     pub(crate) hash_builder: Box<RandomState>,
-    pub(crate) data: Vec<Hashbucket>,
+    /// Mmap-backed storage for hash buckets.
+    pub(crate) allocation: HugepageAllocation,
+    /// Number of buckets (2^power).
+    pub(crate) num_buckets: usize,
     pub(crate) mask: u64,
     /// If true, use two-choice hashing for higher fill rates (~95%).
     /// If false, use single-choice hashing for higher throughput (~30% faster).
@@ -15,15 +19,20 @@ pub struct Hashtable {
 
 impl Hashtable {
     /// Create a new hashtable with single-choice hashing (default, faster).
-    pub fn new(power: u8) -> Self {
-        Self::with_two_choice(power, false)
+    pub fn new(power: u8) -> Result<Self, std::io::Error> {
+        Self::with_hugepage_size(power, false, HugepageSize::None)
     }
 
     /// Create a new hashtable with configurable two-choice hashing.
     ///
     /// - `two_choice = false`: Single-choice hashing, ~30% faster, ~85% fill rate
     /// - `two_choice = true`: Two-choice hashing, higher fill rate (~95%)
-    pub fn with_two_choice(power: u8, two_choice: bool) -> Self {
+    pub fn with_two_choice(power: u8, two_choice: bool) -> Result<Self, std::io::Error> {
+        Self::with_hugepage_size(power, two_choice, HugepageSize::None)
+    }
+
+    /// Create a new hashtable with specified hugepage size preference.
+    pub fn with_hugepage_size(power: u8, two_choice: bool, hugepage_size: HugepageSize) -> Result<Self, std::io::Error> {
         if power < 4 {
             panic!("power too low");
         }
@@ -39,30 +48,36 @@ impl Hashtable {
         #[cfg(not(test))]
         let hash_builder = RandomState::new();
 
-        let buckets = 1_u64 << power;
-        let mask = buckets - 1;
+        let num_buckets = 1_usize << power;
+        let mask = (num_buckets as u64) - 1;
 
-        let mut data = Vec::with_capacity(buckets as usize);
-        for _ in 0..(buckets as usize) {
-            data.push(Hashbucket {
-                info: AtomicU64::new(0),
-                items: [
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                    AtomicU64::new(0),
-                ],
-            });
-        }
+        // Calculate size needed for all buckets
+        // Each Hashbucket is 64 bytes (8 * AtomicU64)
+        let alloc_size = num_buckets * std::mem::size_of::<Hashbucket>();
 
-        Self {
+        // Allocate mmap'd memory with hugepage support
+        let allocation = allocate(alloc_size, hugepage_size)?;
+
+        // Initialize all buckets to zero (already done by mmap, but be explicit)
+        // The prefault in hugepage::allocate already zeroed the memory via write_volatile
+        // AtomicU64::new(0) is equivalent to all-zeros representation
+
+        Ok(Self {
             hash_builder: Box::new(hash_builder),
-            data,
+            allocation,
+            num_buckets,
             mask,
             two_choice,
+        })
+    }
+
+    /// Get a reference to a bucket by index.
+    #[inline]
+    pub(crate) fn bucket(&self, index: usize) -> &Hashbucket {
+        debug_assert!(index < self.num_buckets);
+        unsafe {
+            let ptr = self.allocation.as_ptr() as *const Hashbucket;
+            &*ptr.add(index)
         }
     }
 
@@ -80,7 +95,7 @@ impl Hashtable {
     /// Count the number of occupied slots (non-empty, non-ghost) in a bucket.
     #[inline]
     fn count_occupied(&self, bucket_index: usize) -> usize {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
         let mut count = 0;
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Relaxed);
@@ -144,7 +159,7 @@ impl Hashtable {
         key: &[u8],
         segments: &P,
     ) -> Option<(u32, u32)> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Acquire);
@@ -219,7 +234,7 @@ impl Hashtable {
 
     /// Search a single bucket for a ghost entry with matching tag.
     fn search_bucket_for_ghost(&self, bucket_index: usize, tag: u16) -> Option<u8> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Acquire);
@@ -306,7 +321,7 @@ impl Hashtable {
         key: &[u8],
         segments: &P,
     ) -> bool {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Acquire);
@@ -341,7 +356,7 @@ impl Hashtable {
         key: &[u8],
         segments: &P,
     ) -> Option<u8> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Acquire);
@@ -406,7 +421,7 @@ impl Hashtable {
         segment_id: u32,
         offset: u32,
     ) -> Option<u8> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Acquire);
@@ -780,7 +795,7 @@ impl Hashtable {
         key: &[u8],
         segments: &P,
     ) -> bool {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let current = slot.load(Ordering::Acquire);
@@ -813,7 +828,7 @@ impl Hashtable {
         segments: &P,
         metrics: &crate::metrics::CacheMetrics,
     ) -> Option<Result<(), crate::CacheError>> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let current = slot.load(Ordering::Acquire);
@@ -870,7 +885,7 @@ impl Hashtable {
         key: &[u8],
         segments: &P,
     ) -> bool {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for other_slot in &bucket.items {
             if std::ptr::eq(our_slot, other_slot) {
@@ -900,7 +915,7 @@ impl Hashtable {
             let other_bucket_index = if bucket_index == primary { secondary } else { primary };
 
             if other_bucket_index != bucket_index {
-                let other_bucket = &self.data[other_bucket_index];
+                let other_bucket = self.bucket(other_bucket_index);
                 for slot in &other_bucket.items {
                     let packed = slot.load(Ordering::Acquire);
                     if packed == 0 || Hashbucket::is_ghost(packed) {
@@ -935,7 +950,7 @@ impl Hashtable {
         segments: &P,
         metrics: &crate::metrics::CacheMetrics,
     ) -> Option<Result<(u32, u32), crate::CacheError>> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let current = slot.load(Ordering::Acquire);
@@ -990,7 +1005,7 @@ impl Hashtable {
         segments: &P,
         metrics: &crate::metrics::CacheMetrics,
     ) -> Option<Result<Option<(u32, u32)>, ()>> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let current = slot.load(Ordering::Acquire);
@@ -1040,7 +1055,7 @@ impl Hashtable {
         offset: u32,
         metrics: &crate::metrics::CacheMetrics,
     ) -> Option<Result<Option<(u32, u32)>, ()>> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let current = slot.load(Ordering::Acquire);
@@ -1084,7 +1099,7 @@ impl Hashtable {
         segments: &P,
         metrics: &crate::metrics::CacheMetrics,
     ) -> Option<Result<Option<(u32, u32)>, ()>> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let current = slot.load(Ordering::Acquire);
@@ -1140,7 +1155,7 @@ impl Hashtable {
         key: &[u8],
         segments: &P,
     ) -> Option<(u32, u32)> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for other_slot in &bucket.items {
             if std::ptr::eq(exclude_slot, other_slot) {
@@ -1192,7 +1207,7 @@ impl Hashtable {
         new_packed: u64,
         metrics: &crate::metrics::CacheMetrics,
     ) -> Option<Result<Option<(u32, u32)>, ()>> {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let current = slot.load(Ordering::Acquire);
@@ -1272,7 +1287,7 @@ impl Hashtable {
         offset: u32,
         metrics: &crate::metrics::CacheMetrics,
     ) -> bool {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Acquire);
@@ -1365,7 +1380,7 @@ impl Hashtable {
         offset: u32,
         metrics: &crate::metrics::CacheMetrics,
     ) -> bool {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Acquire);
@@ -1524,7 +1539,7 @@ impl Hashtable {
         new_offset: u32,
         preserve_freq: bool,
     ) -> bool {
-        let bucket = &self.data[bucket_index];
+        let bucket = self.bucket(bucket_index);
 
         for slot in &bucket.items {
             let packed = slot.load(Ordering::Acquire);
@@ -1801,20 +1816,20 @@ mod tests {
 
     #[test]
     fn test_hashtable_new() {
-        let ht = Hashtable::new(4); // 2^4 = 16 buckets
+        let ht = Hashtable::new(4).unwrap(); // 2^4 = 16 buckets
         assert_eq!(ht.mask, 15); // 16 - 1
-        assert_eq!(ht.data.len(), 16);
+        assert_eq!(ht.num_buckets, 16);
     }
 
     #[test]
     fn test_hashtable_new_power_range() {
         // Test minimum power (4 = 16 buckets)
-        let ht_min = Hashtable::new(4);
-        assert_eq!(ht_min.data.len(), 16);
+        let ht_min = Hashtable::new(4).unwrap();
+        assert_eq!(ht_min.num_buckets, 16);
 
         // Test larger power
-        let ht_large = Hashtable::new(10); // 1024 buckets
-        assert_eq!(ht_large.data.len(), 1024);
+        let ht_large = Hashtable::new(10).unwrap(); // 1024 buckets
+        assert_eq!(ht_large.num_buckets, 1024);
     }
 
     #[test]
@@ -1869,7 +1884,7 @@ mod tests {
             .expect("Failed to create pool");
 
         // Use two-choice hashing for this test
-        let hashtable = Hashtable::with_two_choice(power, true);
+        let hashtable = Hashtable::with_two_choice(power, true).unwrap();
         let metrics = crate::metrics::CacheMetrics::new();
 
         // Insert items until we hit many failures
@@ -1933,7 +1948,7 @@ mod tests {
             .expect("Failed to create pool");
 
         // Default: single-choice hashing
-        let hashtable = Hashtable::new(power);
+        let hashtable = Hashtable::new(power).unwrap();
         let metrics = crate::metrics::CacheMetrics::new();
 
         let mut success = 0;

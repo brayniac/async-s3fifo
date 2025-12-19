@@ -48,7 +48,7 @@ fn bench_hashtable_insert(c: &mut Criterion) {
                                 .build()
                                 .expect("Failed to create pool");
 
-                            let hashtable = Hashtable::with_two_choice(power, two_choice);
+                            let hashtable = Hashtable::with_two_choice(power, two_choice).unwrap();
                             let metrics = CacheMetrics::new();
 
                             // Pre-allocate segments and write items to them
@@ -136,7 +136,7 @@ fn bench_hashtable_lookup(c: &mut Criterion) {
                 .build()
                 .expect("Failed to create pool");
 
-            let hashtable = Hashtable::with_two_choice(power, two_choice);
+            let hashtable = Hashtable::with_two_choice(power, two_choice).unwrap();
             let metrics = CacheMetrics::new();
 
             let mut items = Vec::with_capacity(num_items);

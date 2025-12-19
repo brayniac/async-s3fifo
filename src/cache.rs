@@ -460,7 +460,11 @@ impl CacheBuilder {
         }
 
         // Build the cache
-        let hashtable = Hashtable::with_two_choice(self.hashtable_power, self.two_choice_hashing);
+        let hashtable = Hashtable::with_hugepage_size(
+            self.hashtable_power,
+            self.two_choice_hashing,
+            self.hugepage_size,
+        )?;
         let metrics = CacheMetrics::new();
 
         // Build RAM pool
