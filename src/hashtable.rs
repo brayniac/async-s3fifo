@@ -1580,6 +1580,11 @@ pub struct Hashbucket {
     pub(crate) items: [AtomicU64; 7],
 }
 
+// Static assertion: Hashbucket must be exactly 64 bytes for correct pointer arithmetic
+// when accessing buckets in mmap'd memory
+const _: () = assert!(std::mem::size_of::<Hashbucket>() == 64, "Hashbucket must be 64 bytes");
+const _: () = assert!(std::mem::align_of::<Hashbucket>() == 8, "Hashbucket must have 8-byte alignment");
+
 impl Hashbucket {
     #[allow(dead_code)]
     pub fn cas(&self) -> u32 {

@@ -197,7 +197,7 @@ fn allocate_regular_internal(
     }
 
     // Pre-fault pages
-    prefault(ptr as *mut u8, alloc_size);
+    prefault(ptr as *mut u8, alloc_size, 4096);
 
     Ok(HugepageAllocation {
         ptr: unsafe { NonNull::new_unchecked(ptr as *mut u8) },
@@ -243,7 +243,7 @@ fn try_mmap_hugepage(size: usize, page_size: usize) -> Result<NonNull<u8>, std::
     }
 
     // Pre-fault hugepages
-    prefault(ptr as *mut u8, size);
+    prefault(ptr as *mut u8, size, page_size);
 
     Ok(unsafe { NonNull::new_unchecked(ptr as *mut u8) })
 }
@@ -259,14 +259,9 @@ fn try_mmap_hugepage(_size: usize, _page_size: usize) -> Result<NonNull<u8>, std
 
 /// Pre-fault all pages by touching each page.
 /// This forces the OS to allocate physical pages immediately.
-fn prefault(ptr: *mut u8, size: usize) {
-    // For hugepages, touch one location per hugepage
-    // For regular pages, touch one location per 4KB page
-    // Using 4KB steps works for both (just touches more than needed for hugepages)
-    const PAGE_SIZE: usize = 4096;
-
+fn prefault(ptr: *mut u8, size: usize, page_size: usize) {
     unsafe {
-        for offset in (0..size).step_by(PAGE_SIZE) {
+        for offset in (0..size).step_by(page_size) {
             std::ptr::write_volatile(ptr.add(offset), 0);
         }
     }
