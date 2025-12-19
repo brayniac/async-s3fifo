@@ -1574,6 +1574,7 @@ impl Hashtable {
     }
 }
 
+#[repr(C)]
 pub struct Hashbucket {
     pub(crate) info: AtomicU64,
     pub(crate) items: [AtomicU64; 7],
